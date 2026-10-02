@@ -116,6 +116,11 @@
         function handleError(error) {
             console.warn("GPS Error: " + error.message);
         }
+
+        window.onload = function() { 
+            toggleTracking(); 
+        };
     </script>
 </body>
 </html>
+
