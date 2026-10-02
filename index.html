@@ -1,0 +1,283 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head><script type='text/javascript' nonce="W5saSQciNULkgHKypPaCkQ";>
+const lsijVersion = 1;
+
+
+
+class Flags {
+	constructor(url, terms) {
+		this.url = url;
+		this.matched = {};
+
+		this.terms = [];
+		terms.forEach((term) => {
+			let s = term.replace(/[\]{}?^$().*\\+|[]/g, '\\$&');
+			s = s.replace(/\\\*/g, '.*');
+			s = s.replace(/\\\?/g, '.');
+			let regex = new RegExp('\\b' + s + '\\b', 'gi');
+
+			this.terms.push({term: term, regex: regex});
+		});
+	}
+
+	report(flags) {
+		if (!flags.length) {
+			return;
+		}
+		console.debug('[LS Filter] sending -> ', flags);
+
+		const xhr = new XMLHttpRequest();
+		xhr.open('POST', document.location.origin + '/69a084c160c673d315b95156eac306a101b9d5aad562753b3d8e920458ba5697/log_flag', true);
+		xhr.send(JSON.stringify({
+			url: this.url.href,
+			flags: flags,
+			at_epoch_ms: Date.now()
+		}));
+	}
+
+	matchTerms(input) {
+		const matches = [];
+		this.terms.forEach((term) => {
+			if (this.matched[term.term]) {
+				return;
+			}
+
+			const hits = input.match(term.regex);
+			if (!hits || !hits.length) {
+				return;
+			}
+
+			this.matched[term.term] = hits.length;
+			matches.push([term.term, hits.length]);
+		});
+
+		return matches;
+	}
+
+	scanIntentValue(value) {
+		const matches = this.matchTerms(value);
+		const changes = [];
+
+		matches.forEach((match) => {
+			match[2] = true; // mark as user entered
+			changes.push(match);
+		});
+
+		if (changes.length) {
+			this.report(changes);
+		}
+	}
+
+	scanIntentValues(values) {
+		values.forEach((value) => {
+			this.scanIntentValue(value);
+		});
+	}
+
+	scanIntentEvent(event) {
+		switch (event.target.tagName.toLowerCase()) {
+		case 'input':
+			let type = event.target.type || 'text';
+			type = type.toLowerCase();
+
+			// Dont scan password fields
+			if (type === 'password') {
+				return;
+			}
+
+			this.scanIntentValue(event.target.value);
+			break;
+
+		case 'textarea':
+			this.scanIntentValue(event.target.value);
+			break;
+
+		}
+	}
+
+	scanIntent() {
+		if (typeof(gatherIntent) === 'function') {
+			const intent = gatherIntent();
+			if (intent.length) {
+				this.scanIntentValues(intent);
+			}
+		}
+	}
+
+	onChange(event) {
+		this.scanIntentEvent(event);
+	}
+
+	onKeyup(event) {
+		this.scanIntentEvent(event);
+	}
+
+	bindDOM() {
+		document.addEventListener('change', this.onChange.bind(this));
+		document.addEventListener('keyup', this.onKeyup.bind(this));
+		setInterval(() => {
+			this.scanIntent();
+		}, 1000);
+	}
+}
+
+function initFlagScanning() {
+	const xhr = new XMLHttpRequest();
+	xhr.open('POST', document.location.origin + '/69a084c160c673d315b95156eac306a101b9d5aad562753b3d8e920458ba5697/get_flags', false);
+	xhr.send(JSON.stringify({}));
+	
+	let terms = [];
+	if (xhr.status === 200) {
+		try {
+			terms = JSON.parse(xhr.responseText);
+		} catch (e) {
+			console.error('[LS Filter] failed to parse flagged terms:', e);
+		}
+	}
+
+	if (!terms.length) {
+		return;
+	}
+
+	console.debug('[LS Filter] init flag scanning');
+	const a = document.createElement('A');
+	a.href = window.location.href;
+	const flags = new Flags(a, terms);
+
+	
+	console.debug('[LS Filter] flagging intent');
+
+	if (typeof(initGatherIntent) === 'function') {
+		initGatherIntent();
+	}
+	flags.bindDOM();
+	
+};
+
+initFlagScanning();
+
+
+
+const blockImg = "/69a084c160c673d315b95156eac306a101b9d5aad562753b3d8e920458ba5697/blocked-image-search.png";
+
+let hardBlockPolicy;
+
+function scoreUrl(body, callback) {
+  const xhr = new XMLHttpRequest();
+  const checkUrl = document.location.origin + '/69a084c160c673d315b95156eac306a101b9d5aad562753b3d8e920458ba5697/log';
+  xhr.open('POST', checkUrl, true);
+  xhr.send(JSON.stringify(body));
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState === 4) { // Request completed
+      if (this.status === 200 && xhr.responseText) {
+        try {
+          const score = JSON.parse(xhr.responseText);
+          if (callback) {
+            callback(score);
+          } else {
+            console.log('[LS Filter] score ->', score.allow);
+            if (score.redirect) {
+              window.location.href = score.redirect;
+              hardBlock();
+            }
+          }
+        } catch (err) {
+          console.error('[LS Filter] error parsing score response ->', err);
+          if (callback) {
+            callback({ allow: 'error', error: err.message });
+          }
+        }
+      } else {
+        // HTTP error or empty response
+        console.error('[LS Filter] score request failed ->', this.status, xhr.statusText);
+        if (callback) {
+          callback({ allow: 'error', error: `HTTP ${this.status}` });
+        }
+      }
+    }
+  };
+  
+  // Handle network errors
+  xhr.onerror = function() {
+    console.error('[LS Filter] score request network error');
+    if (callback) {
+      callback({ allow: 'error', error: 'network error' });
+    }
+  };
+  
+  // Handle timeout
+  xhr.ontimeout = function() {
+    console.error('[LS Filter] score request timeout');
+    if (callback) {
+      callback({ allow: 'error', error: 'timeout' });
+    }
+  };
+}
+
+function getHardBlockPolicy() {
+  if (typeof(trustedTypes) !== 'undefined' && !hardBlockPolicy) {
+    hardBlockPolicy = trustedTypes.createPolicy('hardBlock', {
+      createHTML: (string) => string
+    });
+  }
+  return hardBlockPolicy;
+}
+
+function hardBlock() {
+  pauseVideo();
+  const stopInt = setInterval(pauseVideo, 500);
+  setTimeout(() => {
+    const policy = getHardBlockPolicy();
+    if (policy) {
+      document.body.innerHTML = policy.createHTML(`<img src="${blockImg}" style="width: 100%; height: 100%">`);
+    } else {
+      document.body.innerHTML = `<img src="${blockImg}" style="width: 100%; height: 100%">`;
+    }
+    clearInterval(stopInt);
+  }, 3000)
+}
+
+function pauseVideo() {
+  const ea = document.getElementsByTagName('video');
+  if (ea.length == 0) { return; }
+  for (i in ea) {
+    if (typeof(ea[i].pause) !== 'function') { continue; }
+    console.debug('[LS Filter] paused ->', ea[i].paused);
+    if (!ea[i].paused) {
+      console.debug('[LS Filter] pause video');
+      ea[i].pause();
+    }
+    const e = ea[i].closest('ytd-channel-video-player-renderer');
+    if (e && e.style.display !== 'none') {
+      console.debug('[LS Filter] hide autoplay container');
+      e.style.display = 'none';
+    }
+  }
+}
+
+function onLoad() {
+  console.log('[LS Filter] loaded');
+  if (window.top === window.self) {
+    console.log('[LS Filter] top window: ' + window.location.href);
+    scoreUrl({ url: window.location.href }, false);
+  }
+}
+
+onLoad();
+
+</script>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2575.7">
+  <style type="text/css">
+    p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 14.0px Courier; -webkit-text-stroke: #000000}
+    span.s1 {font-kerning: none}
+  </style>
+</head>
+<body>
+<p class="p1"><span class="s1">&lt;!DOCTYPE html&gt; &lt;html lang="en"&gt; &lt;head&gt; &lt;meta charset="UTF-8"&gt; &lt;meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"&gt; &lt;title&gt;Clench Tracker&lt;/title&gt; &lt;style&gt; body, html { margin: 0; padding: 0; width: 100%; height: 100%; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background-color: #000; color: #fff; overflow: hidden; } #app-button { width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; border: none; cursor: pointer; transition: background 0.2s; background: #111; } .active { background: #003311 !important; } .alert-80m { background: #4a3b00 !important; } h1 { font-size: 2rem; margin: 0 0 10px 0; color: #ff3b30; } .active h1 { color: #34c759; } .alert-80m h1 { color: #ffcc00; } #distance { font-size: 4.5rem; font-weight: bold; margin: 15px 0; font-variant-numeric: tabular-nums; } p { font-size: 1.1rem; color: #8e8e93; margin: 0; text-align: center; padding: 0 15px; } &lt;/style&gt; &lt;/head&gt; &lt;body&gt; &lt;button id="app-button" onclick="toggleTracking()"&gt; &lt;h1 id="status"&gt;TRACKING OFF&lt;/h1&gt; &lt;div id="distance"&gt;0.0 m&lt;/div&gt; &lt;p id="instruction"&gt;Clench fist to START&lt;/p&gt; &lt;/button&gt; &lt;script&gt; let isTracking = false; let watchId = null; let lastPosition = null; let totalDistance = 0; let lastHapticDistance = 0; let hasTriggered80m = false; const button = document.getElementById('app-button'); const statusText = document.getElementById('status'); const distanceDisplay = document.getElementById('distance'); const instructionText = document.getElementById('instruction'); function toggleTracking() { // Test/Initialize haptic context on interaction if (navigator.vibrate) navigator.vibrate(100); if (!isTracking) { isTracking = true; button.classList.add('active'); statusText.innerText = "TRACKING ACTIVE"; instructionText.innerText = "Clench fist to STOP &amp; RESET"; if (navigator.geolocation) { watchId = navigator.geolocation.watchPosition(updateLocation, handleError, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }); } } else { isTracking = false; button.classList.remove('active'); button.classList.remove('alert-80m'); statusText.innerText = "TRACKING OFF"; instructionText.innerText = "Clench fist to START"; if (watchId) navigator.geolocation.clearWatch(watchId); // Enforce strict reset rule: clear all values immediately totalDistance = 0; lastHapticDistance = 0; hasTriggered80m = false; lastPosition = null; distanceDisplay.innerText = "0.0 m"; } } function updateLocation(position) { if (!isTracking || position.coords.accuracy &gt; 15) return; if (lastPosition) { const lat1 = lastPosition.coords.latitude; const lon1 = lastPosition.coords.longitude; const lat2 = position.coords.latitude; const lon2 = position.coords.longitude; const deltaDistance = haversineDistance(lat1, lon1, lat2, lon2); totalDistance += deltaDistance; distanceDisplay.innerText = totalDistance.toFixed(1) + " m"; // 80m Milestone: Heavy continuous pulse pattern if (totalDistance &gt;= 80.0 &amp;&amp; !hasTriggered80m) { hasTriggered80m = true; button.classList.add('alert-80m'); statusText.innerText = "80m TARGET HIT"; if (navigator.vibrate) { // Long continuous buzz, short pause, then 3 violent rapid pulses navigator.vibrate([1200, 200, 200, 100, 200, 100, 200]); } lastHapticDistance = 80; } // Standard 10m Interval: Clean double tap pulse else if (totalDistance - lastHapticDistance &gt;= 10.0) { if (navigator.vibrate) { navigator.vibrate([250, 150, 250]); } lastHapticDistance = Math.floor(totalDistance / 10) * 10; } } lastPosition = position; } function haversineDistance(lat1, lon1, lat2, lon2) { const R = 6371000; const dLat = (lat2 - lat1) * Math.PI / 180; const dLon = (lon2 - lon1) * Math.PI / 180; const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2); const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); return R * c; } function handleError(error) { console.warn("GPS Error: " + error.message); } &lt;/script&gt; &lt;/body&gt; &lt;/html&gt;</span></p>
+</body>
+</html>
